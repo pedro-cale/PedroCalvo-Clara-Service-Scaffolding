@@ -22,19 +22,28 @@ Por defecto se crea un directorio con el mismo nombre que `--name`. Para otra ru
 
 Requisitos: Python 3.10+ (solo biblioteca estándar).
 
-## Qué genera
+## Estructura de este repositorio
+
+| Ruta | Rol |
+|------|-----|
+| `scaffold.py` | CLI: copia archivos de la raíz (menos `api/` / `worker/`), sustituye placeholders y escribe `.github/workflows/ci.yml` en el destino. |
+| `.github/workflows/service-ci.yml` | Plantilla del CI del microservicio; `scaffold.py` genera `ci.yml` en el destino. Los `paths` del push excluyen `pyproject.toml` y `requirements-dev.txt` de la raíz del scaffolding para no disparar el job aquí; incluye `workflow_dispatch`. |
+| `SERVICE_README.md` | README del servicio (placeholders); en el destino pasa a ser `README.md`. |
+| `gitignore.service` | Contenido de `.gitignore` del servicio generado. |
+| `VERSION`, `requirements-dev.txt`, `pyproject.toml`, `terraform/` | Plantillas base copiadas al servicio. |
+| `api/`, `worker/` | Variantes; se copia una según `--type`. |
+
+## Qué genera el scaffold
 
 | Elemento | Descripción |
 |----------|-------------|
-| `app/` | Código de la aplicación |
+| `app/` | Código (desde `api/` o `worker/`) |
 | `Dockerfile` | Imagen lista para construir |
-| `.github/workflows/ci.yml` | CI en push a `master` |
+| `.github/workflows/ci.yml` | CI en push a `main` o `master` (con filtros de rutas) |
 | `terraform/` | ECR, bucket S3 cifrado, CloudWatch log group |
-| `README.md` | Runbook operacional base en español |
+| `README.md` | Runbook (desde `SERVICE_README.md`) |
 
-El job `push` reutiliza los mismos pasos que en tu referencia: **Configure AWS credentials** (`configure-aws-credentials@v4`), **Login to AWS ECR** (`amazon-ecr-login@v2`) y el script **Build & Push Docker Image** (tag desde `VERSION`, repo `__SERVICE_NAME__-${{ vars.ENV }}`).
-
-En el repositorio generado debes configurar variables GitHub (`AWS_ACCOUNT`, `ENV`) y el rol OIDC `gh-actions-role` como en tu flujo actual.
+El job `push` reutiliza **Configure AWS credentials**, **Login to AWS ECR** y **Build & Push Docker Image** como en tu referencia.
 
 ## Licencia
 

@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import argparse
-import shutil
-import sys
 from pathlib import Path
 
 VALID_TYPES = ("api", "worker")
 
-TEMPLATE_ROOT = Path(__file__).resolve().parent / "templates"
+REPO_ROOT = Path(__file__).resolve().parent
+VARIANT_DIRS = frozenset({"api", "worker"})
+SKIP_DIRS = frozenset({".git", ".github", *VARIANT_DIRS})
+TOOL_FILES = frozenset({"scaffold.py", "README.md", ".gitignore"})
+SERVICE_README = "SERVICE_README.md"
+GITIGNORE_SERVICE = "gitignore.service"
+WORKFLOW_SOURCE = REPO_ROOT / ".github" / "workflows" / "service-ci.yml"
 
 
 def substitute(text: str, mapping: dict[str, str]) -> str:
@@ -28,6 +32,45 @@ def copy_tree(src: Path, dst: Path, mapping: dict[str, str]) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         raw = path.read_text(encoding="utf-8")
         out.write_text(substitute(raw, mapping), encoding="utf-8")
+
+
+def copy_base_templates(dst: Path, mapping: dict[str, str]) -> None:
+    readme_src = REPO_ROOT / SERVICE_README
+    if not readme_src.is_file():
+        raise SystemExit(f"Missing {SERVICE_README} in the scaffolding repo.")
+    (dst / "README.md").write_text(
+        substitute(readme_src.read_text(encoding="utf-8"), mapping),
+        encoding="utf-8",
+    )
+
+    gi_src = REPO_ROOT / GITIGNORE_SERVICE
+    if not gi_src.is_file():
+        raise SystemExit(f"Missing {GITIGNORE_SERVICE} in the scaffolding repo.")
+    (dst / ".gitignore").write_text(gi_src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    for path in sorted(REPO_ROOT.iterdir()):
+        if path.is_dir():
+            if path.name in SKIP_DIRS:
+                continue
+            copy_tree(path, dst / path.name, mapping)
+            continue
+        if not path.is_file():
+            continue
+        if path.name in TOOL_FILES | {SERVICE_README, GITIGNORE_SERVICE}:
+            continue
+        (dst / path.name).write_text(
+            substitute(path.read_text(encoding="utf-8"), mapping),
+            encoding="utf-8",
+        )
+
+
+def render_generated_workflow(dst: Path, mapping: dict[str, str]) -> None:
+    if not WORKFLOW_SOURCE.is_file():
+        raise SystemExit("Missing .github/workflows/service-ci.yml in the scaffolding repo.")
+    text = substitute(WORKFLOW_SOURCE.read_text(encoding="utf-8"), mapping)
+    out = dst / ".github" / "workflows" / "ci.yml"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
 
 
 def validate_service_name(name: str) -> None:
@@ -68,10 +111,11 @@ def main() -> None:
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"Refusing to write into non-empty directory: {out}")
 
-    common = TEMPLATE_ROOT / "common"
-    variant = TEMPLATE_ROOT / args.type
-    if not common.is_dir() or not variant.is_dir():
-        raise SystemExit("Template folders are missing; reinstall the scaffolding repo.")
+    variant = REPO_ROOT / args.type
+    if not variant.is_dir():
+        raise SystemExit(
+            f"Missing variant folder {args.type!r} (expected {variant})."
+        )
 
     mapping = {
         "__SERVICE_NAME__": args.name,
@@ -79,7 +123,8 @@ def main() -> None:
     }
 
     out.mkdir(parents=True, exist_ok=True)
-    copy_tree(common, out, mapping)
+    copy_base_templates(out, mapping)
+    render_generated_workflow(out, mapping)
     copy_tree(variant, out, mapping)
 
     print(f"Scaffolded service at {out}")

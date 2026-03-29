@@ -27,12 +27,14 @@ El archivo `VERSION` define la etiqueta de imagen que publica CI. Incrementa sem
 
 ## CI/CD (GitHub Actions)
 
-El workflow `.github/workflows/ci.yml` corre en cada push a `master`:
+El workflow `.github/workflows/ci.yml` corre en push a `main` o `master` cuando cambian `app/`, `Dockerfile`, `tests/`, `requirements.txt` o el propio `ci.yml`. También puedes lanzarlo manualmente (**Actions → CI → Run workflow**). Cambios solo en `requirements-dev.txt` o `pyproject.toml` no disparan el pipeline; usa `workflow_dispatch` o toca alguna ruta anterior.
 
 1. **lint** — `ruff check` y `ruff format --check`
 2. **test** — `pytest`
 3. **build** — valida `docker build`
 4. **push** — asume rol OIDC en AWS, login a ECR y publica la imagen
+
+Si solo cambias `VERSION` y necesitas pipeline, añade `VERSION` a `on.push.paths` en el workflow o incluye un cambio en `app/`.
 
 ### Requisitos en GitHub
 
@@ -81,7 +83,7 @@ Ajusta backend remoto y políticas IAM según tu plataforma (ECS, EKS, Lambda, e
 
 ### Despliegue
 
-1. Merge a `master` tras revisión.
+1. Merge a `main` (o `master`) tras revisión.
 2. Verificar workflow **CI** en GitHub (lint → test → build → push).
 3. Confirmar imagen nueva en ECR con el tag de `VERSION`.
 4. Aplicar cambios de infra con Terraform si hubo cambios en `terraform/`.
