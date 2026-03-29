@@ -1,0 +1,1 @@
+"""__SERVICE_NAME__ (__SERVICE_TYPE__)."""
