@@ -1,135 +1,243 @@
 #!/usr/bin/env python3
-"""Bootstrap a minimal microservice repo from templates."""
+"""Genera una carpeta con Dockerfile, GHA deploy, Terraform y README."""
 
 from __future__ import annotations
 
 import argparse
+import re
+import sys
 from pathlib import Path
 
-VALID_TYPES = ("api", "worker")
-
-REPO_ROOT = Path(__file__).resolve().parent
-VARIANT_DIRS = frozenset({"api", "worker"})
-SKIP_DIRS = frozenset({".git", ".github", *VARIANT_DIRS})
-TOOL_FILES = frozenset({"scaffold.py", "README.md", ".gitignore"})
-SERVICE_README = "SERVICE_README.md"
-GITIGNORE_SERVICE = "gitignore.service"
-WORKFLOW_SOURCE = REPO_ROOT / ".github" / "workflows" / "service-ci.yml"
+VALID_TYPES = ("s3", "ssm")
 
 
-def substitute(text: str, mapping: dict[str, str]) -> str:
-    for key, value in mapping.items():
-        text = text.replace(key, value)
-    return text
+def die(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(1)
 
 
-def copy_tree(src: Path, dst: Path, mapping: dict[str, str]) -> None:
-    for path in sorted(src.rglob("*")):
-        if path.is_dir():
-            continue
-        rel = path.relative_to(src)
-        out = dst / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        raw = path.read_text(encoding="utf-8")
-        out.write_text(substitute(raw, mapping), encoding="utf-8")
+def safe_name(name: str) -> None:
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        die("Usa --name en snake_case (ej. storage_service), solo minúsculas, números y _.")
 
 
-def copy_base_templates(dst: Path, mapping: dict[str, str]) -> None:
-    readme_src = REPO_ROOT / SERVICE_README
-    if not readme_src.is_file():
-        raise SystemExit(f"Missing {SERVICE_README} in the scaffolding repo.")
-    (dst / "README.md").write_text(
-        substitute(readme_src.read_text(encoding="utf-8"), mapping),
-        encoding="utf-8",
-    )
-
-    gi_src = REPO_ROOT / GITIGNORE_SERVICE
-    if not gi_src.is_file():
-        raise SystemExit(f"Missing {GITIGNORE_SERVICE} in the scaffolding repo.")
-    (dst / ".gitignore").write_text(gi_src.read_text(encoding="utf-8"), encoding="utf-8")
-
-    for path in sorted(REPO_ROOT.iterdir()):
-        if path.is_dir():
-            if path.name in SKIP_DIRS:
-                continue
-            copy_tree(path, dst / path.name, mapping)
-            continue
-        if not path.is_file():
-            continue
-        if path.name in TOOL_FILES | {SERVICE_README, GITIGNORE_SERVICE}:
-            continue
-        (dst / path.name).write_text(
-            substitute(path.read_text(encoding="utf-8"), mapping),
-            encoding="utf-8",
-        )
+def write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
-def render_generated_workflow(dst: Path, mapping: dict[str, str]) -> None:
-    if not WORKFLOW_SOURCE.is_file():
-        raise SystemExit("Missing .github/workflows/service-ci.yml in the scaffolding repo.")
-    text = substitute(WORKFLOW_SOURCE.read_text(encoding="utf-8"), mapping)
-    out = dst / ".github" / "workflows" / "ci.yml"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8")
+def terraform_s3(service: str) -> str:
+    return '''terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+variable "aws_region" {
+  type    = string
+  default = "us-west-2"
+}
+
+variable "service_name" {
+  type    = string
+  default = "__SVC__"
+}
+
+resource "aws_s3_bucket" "data" {
+  bucket_prefix = "${var.service_name}-"
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_public_access_block" "data" {
+  bucket                  = aws_s3_bucket.data.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+'''.replace("__SVC__", service)
 
 
-def validate_service_name(name: str) -> None:
-    if not name or not name.replace("-", "").replace("_", "").isalnum():
-        raise SystemExit(
-            "Invalid --name: use letters, numbers, hyphens and underscores only "
-            "(e.g. payments-service)."
-        )
-    if name != name.lower():
-        raise SystemExit("--name should be lowercase for Docker/ECR/S3 consistency.")
+def terraform_ssm(service: str) -> str:
+    return '''terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+variable "aws_region" {
+  type    = string
+  default = "us-west-2"
+}
+
+variable "service_name" {
+  type    = string
+  default = "__SVC__"
+}
+
+resource "aws_ssm_parameter" "placeholder" {
+  name  = "/${var.service_name}/placeholder"
+  type  = "String"
+  value = "change-me"
+}
+'''.replace("__SVC__", service)
+
+
+def deploy_yml(service: str) -> str:
+    # Build/push alineados con Cond-Nast: VERSION, OIDC, ECR, docker build/tag/push.
+    return f"""name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t {service}:ci .
+
+  push:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cat VERSION)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{{{ vars.AWS_ACCOUNT }}}}:role/gh-actions-role
+          aws-region: us-west-2
+
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Docker Image
+        id: build-image
+        run: |
+          VERSION=${{{{ steps.version.outputs.version }}}}
+          ECR_REPO={service}-${{{{ vars.ENV }}}}
+
+          docker build -t $ECR_REPO:$VERSION .
+          docker tag $ECR_REPO:$VERSION ${{{{ steps.login-ecr.outputs.registry }}}}/$ECR_REPO:$VERSION
+          docker push ${{{{ steps.login-ecr.outputs.registry }}}}/$ECR_REPO:$VERSION
+
+          echo "image_tag=$VERSION" >> $GITHUB_OUTPUT
+"""
+
+
+def service_readme(service: str, kind: str) -> str:
+    infra = "bucket S3" if kind == "s3" else "parámetro SSM de ejemplo"
+    return f"""# {service}
+
+Scaffold generado con `scaffold.py` (`--type {kind}`).
+
+## Local
+
+```bash
+pip install ruff pytest
+ruff check .
+pytest -q
+docker build -t {service}:local .
+```
+
+## CI
+
+`.github/workflows/deploy.yml`: lint → test → build (imagen local) → push a ECR (OIDC + `vars.AWS_ACCOUNT`, `vars.ENV`).
+
+Imagen: `{service}-<ENV>:<VERSION>` (lee `VERSION`).
+
+## Terraform
+
+Infra mínima: {infra} bajo `terraform/`.
+
+```bash
+cd terraform
+terraform init
+terraform apply
+```
+"""
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Scaffold a minimal Python microservice with Docker, CI, and Terraform."
+    p = argparse.ArgumentParser(description="Scaffold mínimo: storage S3 o parámetros SSM.")
+    p.add_argument("--name", required=True, help="Nombre de carpeta y prefijo (snake_case).")
+    p.add_argument("--type", choices=VALID_TYPES, required=True, help="s3 | ssm")
+    args = p.parse_args()
+
+    safe_name(args.name)
+    root = Path(args.name).resolve()
+    if root.exists():
+        die(f"Ya existe: {root}")
+
+    svc = args.name
+    tf = terraform_s3(svc) if args.type == "s3" else terraform_ssm(svc)
+
+    write(root / "Dockerfile", "FROM python:3.12-slim\nWORKDIR /app\nCOPY app ./app\nCMD [\"python\", \"-c\", \"print('ok')\"]\n")
+    write(root / "VERSION", "0.1.0\n")
+    write(root / "app" / "__init__.py", "")
+    write(root / "app" / "main.py", 'def ok() -> bool:\n    return True\n')
+    write(root / "tests" / "test_main.py", "from app.main import ok\n\ndef test_ok():\n    assert ok()\n")
+    write(
+        root / "pyproject.toml",
+        '[tool.ruff]\nline-length = 100\ntarget-version = "py312"\n\n'
+        '[tool.pytest.ini_options]\npythonpath = ["."]\n',
     )
-    parser.add_argument(
-        "--name",
-        required=True,
-        help="Service name (e.g. payments-service). Used for image, bucket prefix, docs.",
-    )
-    parser.add_argument(
-        "--type",
-        choices=VALID_TYPES,
-        required=True,
-        help="api: FastAPI + uvicorn. worker: long-running process entrypoint.",
-    )
-    parser.add_argument(
-        "--out",
-        default=None,
-        help="Output directory (default: ./<name>).",
-    )
-    args = parser.parse_args()
+    write(root / ".gitignore", ".venv/\n__pycache__/\n.pytest_cache/\n.terraform/\n*.tfstate*\n")
+    write(root / "terraform" / "main.tf", tf)
+    write(root / ".github" / "workflows" / "deploy.yml", deploy_yml(svc))
+    write(root / "README.md", service_readme(svc, args.type))
 
-    validate_service_name(args.name)
-
-    out = Path(args.out or args.name).resolve()
-    if out.exists() and any(out.iterdir()):
-        raise SystemExit(f"Refusing to write into non-empty directory: {out}")
-
-    variant = REPO_ROOT / args.type
-    if not variant.is_dir():
-        raise SystemExit(
-            f"Missing variant folder {args.type!r} (expected {variant})."
-        )
-
-    mapping = {
-        "__SERVICE_NAME__": args.name,
-        "__SERVICE_TYPE__": args.type,
-    }
-
-    out.mkdir(parents=True, exist_ok=True)
-    copy_base_templates(out, mapping)
-    render_generated_workflow(out, mapping)
-    copy_tree(variant, out, mapping)
-
-    print(f"Scaffolded service at {out}")
-    print("Next: cd", out.name, "&& python -m venv .venv && source .venv/bin/activate")
-    print("       pip install -r requirements-dev.txt && pytest && ruff check .")
+    print(f"Listo: {root}")
 
 
 if __name__ == "__main__":
